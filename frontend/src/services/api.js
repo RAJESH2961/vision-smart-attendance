@@ -41,16 +41,28 @@ api.interceptors.response.use(
 
 // ── Auth API ─────────────────────────────────────────────────
 export const authAPI = {
-  login: (email, password) =>
-    api.post('/auth/login', { email, password }),
+  login: (identifier, password) =>
+    api.post('/auth/login', { identifier, password }),
   getMe: () => api.get('/auth/me'),
   seed: () => api.post('/auth/seed'),
+  listFaculty: () => api.get('/auth/faculty'),
+  createFaculty: (data) => api.post('/auth/faculty', data),
+};
+
+// ── Subjects API ─────────────────────────────────────────────
+export const subjectsAPI = {
+  list: (params) => api.get('/subjects', { params }),
+  create: (data) => api.post('/subjects', data),
+  update: (id, data) => api.put(`/subjects/${id}`, data),
+  delete: (id) => api.delete(`/subjects/${id}`),
 };
 
 // ── Students API ─────────────────────────────────────────────
 export const studentsAPI = {
   list: (params) => api.get('/students', { params }),
+  meta: () => api.get('/students/meta'),
   get: (id) => api.get(`/students/${id}`),
+  stats: (id) => api.get(`/students/${id}/stats`),
   create: (data) => api.post('/students', data),
   update: (id, data) => api.put(`/students/${id}`, data),
   delete: (id) => api.delete(`/students/${id}`),
@@ -77,8 +89,10 @@ export const attendanceAPI = {
   getSessionResults: (sessionId) =>
     api.get(`/attendance/session/${sessionId}/results`),
   getToday: (params) => api.get('/attendance/today', { params }),
+  getHistory: (params) => api.get('/attendance/history', { params }),
   getStudentHistory: (studentId, params) =>
     api.get(`/attendance/student/${studentId}`, { params }),
+  getMyHistory: (params) => api.get('/attendance/me', { params }),
   updateAttendance: (attendanceId, data) =>
     api.put(`/attendance/${attendanceId}`, data),
   listSessions: (params) => api.get('/attendance/sessions', { params }),
@@ -88,8 +102,13 @@ export const attendanceAPI = {
 export const reportsAPI = {
   getSummary: (params) =>
     api.get('/reports/attendance-summary', { params }),
-  exportCSV: () =>
-    api.get('/reports/export', { responseType: 'blob' }),
+  studentWise: (params) => api.get('/reports/student-wise', { params }),
+  sectionWise: () => api.get('/reports/section-wise'),
+  branchWise: () => api.get('/reports/branch-wise'),
+  subjectWise: () => api.get('/reports/subject-wise'),
+  studentSubjectWise: (studentId) => api.get(`/reports/student/${studentId}/subject-wise`),
+  exportCSV: (params) =>
+    api.get('/reports/export', { params, responseType: 'blob' }),
 };
 
 export default api;

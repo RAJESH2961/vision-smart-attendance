@@ -11,6 +11,8 @@ class SessionStartRequest(BaseModel):
     subject: str
     classroom: str
     section: str
+    year: Optional[int] = None
+    branch: Optional[str] = None
     duration: int = 20  # seconds
 
 
@@ -20,12 +22,15 @@ class SessionResponse(BaseModel):
     subject: str
     classroom: str
     section: str
+    year: Optional[int] = None
+    branch: Optional[str] = None
     duration: int
     start_time: datetime | None = None
     end_time: datetime | None = None
     status: str
     total_recognized: int = 0
     total_unknown: int = 0
+    total_students: int = 0
 
     class Config:
         from_attributes = True
@@ -36,6 +41,7 @@ class SessionStatusResponse(BaseModel):
     status: str
     total_recognized: int
     total_unknown: int
+    total_students: int = 0
     elapsed_seconds: float = 0
     remaining_seconds: float = 0
 
@@ -60,6 +66,23 @@ class AttendanceUpdateRequest(BaseModel):
 
 class AttendanceHistoryResponse(BaseModel):
     records: list[AttendanceRecord]
+    total: int
+    page: int
+    page_size: int
+
+
+class HistoryRecord(AttendanceRecord):
+    """Attendance record enriched with session/class info for history views."""
+    subject: str | None = None
+    classroom: str | None = None
+    year: int | None = None
+    branch: str | None = None
+    section: str | None = None
+    session_date: datetime | None = None
+
+
+class HistoryListResponse(BaseModel):
+    records: list[HistoryRecord]
     total: int
     page: int
     page_size: int

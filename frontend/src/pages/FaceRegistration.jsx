@@ -1,13 +1,15 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { studentsAPI, facesAPI } from '../services/api';
 import { useToast } from '../context/ToastContext';
 import { Camera, CheckCircle2, Fingerprint, Loader2, RefreshCcw } from 'lucide-react';
 import Webcam from 'react-webcam';
 
 export default function FaceRegistration() {
+  const [searchParams] = useSearchParams();
   const [students, setStudents] = useState([]);
-  const [selectedStudent, setSelectedStudent] = useState('');
-  const selectedStudentRef = useRef('');
+  const [selectedStudent, setSelectedStudent] = useState(searchParams.get('student') || '');
+  const selectedStudentRef = useRef(searchParams.get('student') || '');
   
   const [isCapturing, setIsCapturing] = useState(false);
   const [progress, setProgress] = useState(0); // 0 to 20

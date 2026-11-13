@@ -30,12 +30,15 @@ class AttendanceSession(Base):
     subject = Column(String(100), nullable=False)
     classroom = Column(String(50), nullable=False)
     section = Column(String(10), nullable=False)
+    year = Column(Integer, nullable=True)
+    branch = Column(String(100), nullable=True)
     duration = Column(Integer, default=20)  # Duration in seconds
     start_time = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     end_time = Column(DateTime(timezone=True), nullable=True)
     status = Column(String(20), default=SessionStatus.PENDING.value)
     total_recognized = Column(Integer, default=0)
     total_unknown = Column(Integer, default=0)
+    total_students = Column(Integer, default=0)  # Students expected in this class
 
     # Relationships
     faculty = relationship("Faculty", back_populates="attendance_sessions")

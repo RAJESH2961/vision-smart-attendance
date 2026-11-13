@@ -35,12 +35,22 @@ logger = logging.getLogger(__name__)
 active_sessions: dict[int, dict] = {}
 
 
-async def load_all_embeddings(db: AsyncSession) -> list[dict]:
-    """Load all stored face embeddings from the database."""
-    result = await db.execute(
-        select(FaceEmbedding, Student).join(Student, FaceEmbedding.student_id == Student.id)
-    )
-    rows = result.all()
+async def load_class_embeddings(
+    db: AsyncSession,
+    year: Optional[int] = None,
+    branch: Optional[str] = None,
+    section: Optional[str] = None,
+) -> list[dict]:
+    """Load stored face embeddings, optionally scoped to a class (year/branch/section)."""
+    query = select(FaceEmbedding, Student).join(Student, FaceEmbedding.student_id == Student.id)
+    if year:
+        query = query.where(Student.year == year)
+    if branch:
+        query = query.where(Student.branch == branch)
+    if section:
+        query = query.where(Student.section == section)
+
+    rows = (await db.execute(query)).all()
     embeddings = []
     for face_emb, student in rows:
         embeddings.append({
@@ -50,6 +60,23 @@ async def load_all_embeddings(db: AsyncSession) -> list[dict]:
             "embedding": face_emb.embedding,
         })
     return embeddings
+
+
+async def load_class_students(
+    db: AsyncSession,
+    year: Optional[int] = None,
+    branch: Optional[str] = None,
+    section: Optional[str] = None,
+) -> list[Student]:
+    """Load students belonging to a class (for absentee marking)."""
+    query = select(Student)
+    if year:
+        query = query.where(Student.year == year)
+    if branch:
+        query = query.where(Student.branch == branch)
+    if section:
+        query = query.where(Student.section == section)
+    return list((await db.execute(query)).scalars().all())
 
 
 async def start_attendance_session(session_id: int):
@@ -72,10 +99,12 @@ async def start_attendance_session(session_id: int):
             session.start_time = datetime.now(timezone.utc)
             await db.commit()
 
-            # Load all face embeddings
-            stored_embeddings = await load_all_embeddings(db)
+            # Load face embeddings scoped to the selected class
+            stored_embeddings = await load_class_embeddings(
+                db, year=session.year, branch=session.branch, section=session.section
+            )
             if not stored_embeddings:
-                logger.warning("No face embeddings found in database")
+                logger.warning("No face embeddings found for this class")
 
             # Open camera
             camera_source = settings.camera_source_parsed
@@ -179,6 +208,22 @@ async def start_attendance_session(session_id: int):
                             "bbox": bbox,
                         })
 
+                # Draw bounding boxes and labels on the frame
+                for rec in frame_recognitions:
+                    x1, y1, x2, y2 = rec["bbox"]
+                    if rec["is_unknown"]:
+                        color = (68, 68, 239)  # red (#ef4444) in BGR
+                        label = "Unknown"
+                    else:
+                        color = (129, 185, 16)  # emerald (#10b981) in BGR
+                        label = f"{rec['student_roll']} ({rec['confidence']*100:.0f}%)"
+
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+                    label_y = max(y1, th + 8)
+                    cv2.rectangle(frame, (x1, label_y - th - 8), (x1 + tw + 8, label_y), color, -1)
+                    cv2.putText(frame, label, (x1 + 4, label_y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
                 # Encode frame for WebSocket streaming
                 _, buffer = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
                 frame_b64 = base64.b64encode(buffer).decode("utf-8")
@@ -208,6 +253,24 @@ async def start_attendance_session(session_id: int):
             # Cleanup
             if cap and cap.isOpened():
                 cap.release()
+
+            # Mark class students who were not recognized as absent
+            absent_count = 0
+            if session.year or session.branch or session.section:
+                class_students = await load_class_students(
+                    db, year=session.year, branch=session.branch, section=session.section
+                )
+                for stu in class_students:
+                    if stu.id not in recognized_students:
+                        db.add(Attendance(
+                            session_id=session_id,
+                            student_id=stu.id,
+                            status="absent",
+                            confidence=None,
+                            recognized_at=datetime.now(timezone.utc),
+                        ))
+                        absent_count += 1
+                session.total_students = len(class_students)
 
             # Update session with final stats
             await db.refresh(session)

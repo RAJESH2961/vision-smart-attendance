@@ -24,6 +24,7 @@ from app.api.students import router as students_router
 from app.api.faces import router as faces_router
 from app.api.attendance import router as attendance_router
 from app.api.reports import router as reports_router
+from app.api.subjects import router as subjects_router
 
 # ── Logging ───────────────────────────────────────────────────
 logging.basicConfig(
@@ -43,6 +44,23 @@ async def lifespan(app: FastAPI):
     # Create database tables (dev convenience — use Alembic in production)
     await create_tables()
     logger.info("✅ Database tables created/verified")
+
+    # Backfill student portal passwords (default: roll number)
+    try:
+        from app.core.database import AsyncSessionLocal
+        from app.core.security import hash_password
+        from app.models.student import Student
+        from sqlalchemy import select
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(select(Student).where(Student.password_hash.is_(None)))
+            students = result.scalars().all()
+            for s in students:
+                s.password_hash = hash_password(s.roll_number)
+            if students:
+                await db.commit()
+                logger.info(f"✅ Backfilled portal passwords for {len(students)} student(s)")
+    except Exception as e:
+        logger.warning(f"⚠️ Student password backfill skipped: {e}")
 
     # Pre-load InsightFace model (optional — lazy loads on first use)
     try:
@@ -82,6 +100,7 @@ app.include_router(students_router)
 app.include_router(faces_router)
 app.include_router(attendance_router)
 app.include_router(reports_router)
+app.include_router(subjects_router)
 
 
 # ── Health Check ──────────────────────────────────────────────

@@ -5,6 +5,7 @@ import App from './App.jsx'
 import './index.css'
 import { AuthProvider } from './context/AuthContext.jsx'
 import { ToastProvider } from './context/ToastContext.jsx'
+import { ThemeProvider } from './context/ThemeContext.jsx'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -18,11 +19,13 @@ const queryClient = new QueryClient({
 createRoot(document.getElementById('root')).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <ToastProvider>
-        <AuthProvider>
-          <App />
-        </AuthProvider>
-      </ToastProvider>
+      <ThemeProvider>
+        <ToastProvider>
+          <AuthProvider>
+            <App />
+          </AuthProvider>
+        </ToastProvider>
+      </ThemeProvider>
     </QueryClientProvider>
   </StrictMode>,
 )

@@ -31,8 +31,8 @@ export function AuthProvider({ children }) {
     verifyAuth();
   }, [token]);
 
-  const login = useCallback(async (email, password) => {
-    const response = await authAPI.login(email, password);
+  const login = useCallback(async (identifier, password) => {
+    const response = await authAPI.login(identifier, password);
     const { access_token } = response.data;
     localStorage.setItem('access_token', access_token);
     setToken(access_token);

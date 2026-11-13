@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.security import get_current_user, require_staff
 from app.models.faculty import Faculty
 from app.models.student import Student
 from app.models.face_embedding import FaceEmbedding
@@ -27,7 +27,7 @@ async def register_faces(
     student_id: int,
     files: list[UploadFile] = File(..., description="Face images (JPEG/PNG)"),
     db: AsyncSession = Depends(get_db),
-    current_user: Faculty = Depends(get_current_user),
+    current_user: Faculty = Depends(require_staff),
 ):
     """
     Register a student's face by uploading multiple images.
@@ -113,7 +113,7 @@ async def register_faces(
 async def get_face_status(
     student_id: int,
     db: AsyncSession = Depends(get_db),
-    current_user: Faculty = Depends(get_current_user),
+    current_user: Faculty = Depends(require_staff),
 ):
     """Check if a student has registered face embeddings."""
     result = await db.execute(select(Student).where(Student.id == student_id))

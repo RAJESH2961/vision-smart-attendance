@@ -8,7 +8,7 @@ import logging
 from datetime import datetime, timedelta, timezone, date
 from typing import Optional
 
-from sqlalchemy import select, func, case, and_, distinct
+from sqlalchemy import select, func, case, and_, or_, distinct, cast, String
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.attendance import Attendance
@@ -18,65 +18,60 @@ from app.models.student import Student
 logger = logging.getLogger(__name__)
 
 
+def _branch_col():
+    """Branch column with fallback to legacy department."""
+    return func.coalesce(Student.branch, Student.department)
+
+
 async def get_attendance_summary(db: AsyncSession, faculty_id: Optional[int] = None) -> dict:
     """Get overall attendance summary stats."""
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     today_end = today_start + timedelta(days=1)
 
-    # Total students
-    total_students_result = await db.execute(select(func.count(Student.id)))
-    total_students = total_students_result.scalar() or 0
+    total_students = (await db.execute(select(func.count(Student.id)))).scalar() or 0
 
-    # Total sessions
     session_query = select(func.count(AttendanceSession.id))
     if faculty_id:
         session_query = session_query.where(AttendanceSession.faculty_id == faculty_id)
-    total_sessions_result = await db.execute(session_query)
-    total_sessions = total_sessions_result.scalar() or 0
+    total_sessions = (await db.execute(session_query)).scalar() or 0
 
-    # Today's sessions
-    today_sessions_query = select(func.count(AttendanceSession.id)).where(
-        and_(
-            AttendanceSession.start_time >= today_start,
-            AttendanceSession.start_time < today_end,
-        )
+    today_filter = and_(
+        AttendanceSession.start_time >= today_start,
+        AttendanceSession.start_time < today_end,
     )
+    today_sessions_query = select(func.count(AttendanceSession.id)).where(today_filter)
     if faculty_id:
         today_sessions_query = today_sessions_query.where(
             AttendanceSession.faculty_id == faculty_id
         )
-    today_sessions_result = await db.execute(today_sessions_query)
-    total_classes_today = today_sessions_result.scalar() or 0
+    total_classes_today = (await db.execute(today_sessions_query)).scalar() or 0
 
-    # Today's attendance: get session IDs for today
-    today_session_ids_query = select(AttendanceSession.id).where(
-        and_(
-            AttendanceSession.start_time >= today_start,
-            AttendanceSession.start_time < today_end,
-        )
-    )
+    today_session_ids = select(AttendanceSession.id).where(today_filter)
     if faculty_id:
-        today_session_ids_query = today_session_ids_query.where(
+        today_session_ids = today_session_ids.where(
             AttendanceSession.faculty_id == faculty_id
         )
 
-    # Present today (distinct students marked present in today's sessions)
-    present_query = (
-        select(func.count(distinct(Attendance.student_id)))
-        .where(
-            and_(
-                Attendance.session_id.in_(today_session_ids_query),
-                Attendance.status == "present",
-            )
+    # Present/absent today based on today's session records
+    present_query = select(func.count(Attendance.id)).where(
+        and_(
+            Attendance.session_id.in_(today_session_ids),
+            Attendance.status.in_(["present", "late"]),
         )
     )
-    present_result = await db.execute(present_query)
-    present_today = present_result.scalar() or 0
+    present_today = (await db.execute(present_query)).scalar() or 0
 
-    absent_today = max(0, total_students - present_today)
+    absent_query = select(func.count(Attendance.id)).where(
+        and_(
+            Attendance.session_id.in_(today_session_ids),
+            Attendance.status == "absent",
+        )
+    )
+    absent_today = (await db.execute(absent_query)).scalar() or 0
 
+    total_marked = present_today + absent_today
     attendance_percentage = (
-        round((present_today / total_students) * 100, 1) if total_students > 0 else 0
+        round((present_today / total_marked) * 100, 1) if total_marked > 0 else 0
     )
 
     return {
@@ -101,7 +96,6 @@ async def get_daily_attendance_trend(
         day_start = datetime.combine(target_date, datetime.min.time()).replace(tzinfo=timezone.utc)
         day_end = day_start + timedelta(days=1)
 
-        # Get sessions for this day
         session_query = select(AttendanceSession.id).where(
             and_(
                 AttendanceSession.start_time >= day_start,
@@ -111,21 +105,23 @@ async def get_daily_attendance_trend(
         if faculty_id:
             session_query = session_query.where(AttendanceSession.faculty_id == faculty_id)
 
-        # Count present
-        present_query = select(func.count(distinct(Attendance.student_id))).where(
+        present_query = select(func.count(Attendance.id)).where(
             and_(
                 Attendance.session_id.in_(session_query),
-                Attendance.status == "present",
+                Attendance.status.in_(["present", "late"]),
             )
         )
-        present_result = await db.execute(present_query)
-        present = present_result.scalar() or 0
+        present = (await db.execute(present_query)).scalar() or 0
 
-        # Total students
-        total_result = await db.execute(select(func.count(Student.id)))
-        total = total_result.scalar() or 0
+        absent_query = select(func.count(Attendance.id)).where(
+            and_(
+                Attendance.session_id.in_(session_query),
+                Attendance.status == "absent",
+            )
+        )
+        absent = (await db.execute(absent_query)).scalar() or 0
 
-        absent = max(0, total - present)
+        total = present + absent
         percentage = round((present / total) * 100, 1) if total > 0 else 0
 
         results.append({
@@ -139,106 +135,279 @@ async def get_daily_attendance_trend(
     return results
 
 
-async def get_department_wise_attendance(db: AsyncSession) -> list[dict]:
-    """Get attendance breakdown by department."""
-    # Get all departments
-    dept_result = await db.execute(select(distinct(Student.department)))
-    departments = [row[0] for row in dept_result.all()]
-
+async def get_monthly_attendance_trend(db: AsyncSession, months: int = 6) -> list[dict]:
+    """Get monthly aggregated attendance for the last N months."""
     results = []
-    for dept in departments:
-        # Total students in department
-        total_result = await db.execute(
-            select(func.count(Student.id)).where(Student.department == dept)
-        )
-        total = total_result.scalar() or 0
+    today = date.today()
 
-        # Students with attendance (present)
-        present_result = await db.execute(
-            select(func.count(distinct(Attendance.student_id)))
-            .join(Student, Attendance.student_id == Student.id)
-            .where(
-                and_(
-                    Student.department == dept,
-                    Attendance.status == "present",
-                )
+    for i in range(months - 1, -1, -1):
+        # Subtract i months from today
+        y, m = today.year, today.month
+        m -= i
+        while m <= 0:
+            m += 12
+            y -= 1
+        month_start = datetime(y, m, 1, tzinfo=timezone.utc)
+        if m == 12:
+            month_end = datetime(y + 1, 1, 1, tzinfo=timezone.utc)
+        else:
+            month_end = datetime(y, m + 1, 1, tzinfo=timezone.utc)
+
+        session_ids = select(AttendanceSession.id).where(
+            and_(
+                AttendanceSession.start_time >= month_start,
+                AttendanceSession.start_time < month_end,
             )
         )
-        present = present_result.scalar() or 0
-        absent = max(0, total - present)
-        percentage = round((present / total) * 100, 1) if total > 0 else 0
 
+        present = (await db.execute(
+            select(func.count(Attendance.id)).where(
+                and_(
+                    Attendance.session_id.in_(session_ids),
+                    Attendance.status.in_(["present", "late"]),
+                )
+            )
+        )).scalar() or 0
+        absent = (await db.execute(
+            select(func.count(Attendance.id)).where(
+                and_(
+                    Attendance.session_id.in_(session_ids),
+                    Attendance.status == "absent",
+                )
+            )
+        )).scalar() or 0
+
+        total = present + absent
         results.append({
-            "department": dept,
+            "month": month_start.strftime("%b %Y"),
             "present": present,
             "absent": absent,
             "total": total,
-            "percentage": percentage,
+            "percentage": round((present / total) * 100, 1) if total else 0,
         })
 
     return results
 
 
-async def get_top_absentees(db: AsyncSession, limit: int = 10) -> list[dict]:
-    """Get students with most absences."""
-    # Total sessions
-    total_sessions_result = await db.execute(select(func.count(AttendanceSession.id)))
-    total_sessions = total_sessions_result.scalar() or 0
+async def _group_attendance(db: AsyncSession, group_col) -> list[dict]:
+    """Attendance grouped by an arbitrary column/expression."""
+    stats = await db.execute(
+        select(
+            group_col.label("gname"),
+            func.sum(case((Attendance.status == "present", 1), else_=0)).label("present"),
+            func.sum(case((Attendance.status == "late", 1), else_=0)).label("late"),
+            func.sum(case((Attendance.status == "absent", 1), else_=0)).label("absent"),
+        )
+        .select_from(Attendance)
+        .join(Student, Attendance.student_id == Student.id)
+        .group_by(group_col)
+    )
 
-    if total_sessions == 0:
-        return []
+    results = []
+    for row in stats.all():
+        if row.gname is None:
+            continue
+        present = row.present or 0
+        late = row.late or 0
+        absent = row.absent or 0
+        total = present + late + absent
+        results.append({
+            "name": str(row.gname),
+            "present": present,
+            "absent": absent,
+            "late": late,
+            "total": total,
+            "percentage": round(((present + late) / total) * 100, 1) if total else 0,
+        })
+    return sorted(results, key=lambda r: r["name"])
 
-    # Get all students with their present count
+
+async def get_branch_wise_attendance(db: AsyncSession) -> list[dict]:
+    return await _group_attendance(db, _branch_col())
+
+
+async def get_section_wise_attendance(db: AsyncSession) -> list[dict]:
+    """Attendance grouped by 'Year-Branch-Section' class label."""
+    label = func.concat(
+        "Y", cast(Student.year, String), " ",
+        _branch_col(), "-", Student.section
+    )
+    return await _group_attendance(db, label)
+
+
+async def get_subject_wise_attendance(db: AsyncSession) -> list[dict]:
+    """Attendance grouped by subject (from sessions)."""
+    subjects = await db.execute(select(distinct(AttendanceSession.subject)))
+    results = []
+    for (subj,) in subjects.all():
+        if not subj:
+            continue
+        session_ids = select(AttendanceSession.id).where(AttendanceSession.subject == subj)
+        stats = await db.execute(
+            select(
+                func.sum(case((Attendance.status == "present", 1), else_=0)).label("present"),
+                func.sum(case((Attendance.status == "late", 1), else_=0)).label("late"),
+                func.sum(case((Attendance.status == "absent", 1), else_=0)).label("absent"),
+            ).where(Attendance.session_id.in_(session_ids))
+        )
+        row = stats.one()
+        present = row.present or 0
+        late = row.late or 0
+        absent = row.absent or 0
+        total = present + late + absent
+        results.append({
+            "name": subj,
+            "present": present,
+            "absent": absent,
+            "late": late,
+            "total": total,
+            "percentage": round(((present + late) / total) * 100, 1) if total else 0,
+        })
+    return results
+
+
+async def get_student_wise_attendance(
+    db: AsyncSession,
+    year: Optional[int] = None,
+    branch: Optional[str] = None,
+    section: Optional[str] = None,
+) -> list[dict]:
+    """Per-student attendance totals, optionally filtered by class."""
     query = (
         select(
             Student.id,
             Student.name,
             Student.roll_number,
-            Student.department,
-            func.count(Attendance.id).label("present_count"),
+            Student.year,
+            _branch_col().label("branch"),
+            Student.section,
+            func.sum(case((Attendance.status == "present", 1), else_=0)).label("present"),
+            func.sum(case((Attendance.status == "late", 1), else_=0)).label("late"),
+            func.sum(case((Attendance.status == "absent", 1), else_=0)).label("absent"),
         )
-        .outerjoin(Attendance, and_(
-            Attendance.student_id == Student.id,
-            Attendance.status == "present",
-        ))
-        .group_by(Student.id, Student.name, Student.roll_number, Student.department)
-        .order_by(func.count(Attendance.id).asc())
+        .outerjoin(Attendance, Attendance.student_id == Student.id)
+        .group_by(Student.id, Student.name, Student.roll_number, Student.year, Student.branch, Student.department, Student.section)
+        .order_by(Student.roll_number)
+    )
+    if year:
+        query = query.where(Student.year == year)
+    if branch:
+        query = query.where(or_(Student.branch == branch, Student.department == branch))
+    if section:
+        query = query.where(Student.section == section)
+
+    rows = (await db.execute(query)).all()
+    return [
+        {
+            "student_id": r.id,
+            "student_name": r.name,
+            "roll_number": r.roll_number,
+            "year": r.year,
+            "branch": r.branch,
+            "section": r.section,
+            "present": r.present or 0,
+            "absent": r.absent or 0,
+            "late": r.late or 0,
+            "total_classes": (r.present or 0) + (r.absent or 0) + (r.late or 0),
+            "percentage": round(
+                (((r.present or 0) + (r.late or 0)) / ((r.present or 0) + (r.absent or 0) + (r.late or 0))) * 100, 1
+            ) if ((r.present or 0) + (r.absent or 0) + (r.late or 0)) else 0.0,
+        }
+        for r in rows
+    ]
+
+
+async def get_top_absentees(db: AsyncSession, limit: int = 10) -> list[dict]:
+    """Get students with most absences."""
+    total_sessions = (await db.execute(select(func.count(AttendanceSession.id)))).scalar() or 0
+    if total_sessions == 0:
+        return []
+
+    query = (
+        select(
+            Student.id,
+            Student.name,
+            Student.roll_number,
+            _branch_col().label("branch"),
+            func.sum(case((Attendance.status == "absent", 1), else_=0)).label("absent_count"),
+            func.count(Attendance.id).label("total_records"),
+        )
+        .outerjoin(Attendance, Attendance.student_id == Student.id)
+        .group_by(Student.id, Student.name, Student.roll_number, Student.branch, Student.department)
+        .order_by(func.sum(case((Attendance.status == "absent", 1), else_=0)).desc())
         .limit(limit)
     )
 
-    result = await db.execute(query)
-    rows = result.all()
-
+    rows = (await db.execute(query)).all()
     absentees = []
     for row in rows:
-        present_count = row.present_count or 0
-        absent_count = total_sessions - present_count
-        absence_pct = round((absent_count / total_sessions) * 100, 1) if total_sessions > 0 else 0
-
+        absent = row.absent_count or 0
+        total = row.total_records or total_sessions
         absentees.append({
             "student_id": row.id,
             "student_name": row.name,
             "roll_number": row.roll_number,
-            "department": row.department,
-            "total_absent": absent_count,
-            "total_classes": total_sessions,
-            "absence_percentage": absence_pct,
+            "branch": row.branch,
+            "total_absent": absent,
+            "total_classes": total,
+            "absence_percentage": round((absent / total) * 100, 1) if total else 0,
         })
-
     return absentees
 
 
-async def export_attendance_csv(db: AsyncSession) -> str:
-    """Export all attendance records as CSV string."""
+async def get_subject_wise_for_student(
+    db: AsyncSession, student_id: int
+) -> list[dict]:
+    """Per-subject attendance breakdown for a single student."""
+    query = (
+        select(
+            AttendanceSession.subject,
+            func.sum(case((Attendance.status == "present", 1), else_=0)).label("present"),
+            func.sum(case((Attendance.status == "late", 1), else_=0)).label("late"),
+            func.sum(case((Attendance.status == "absent", 1), else_=0)).label("absent"),
+        )
+        .join(AttendanceSession, Attendance.session_id == AttendanceSession.id)
+        .where(Attendance.student_id == student_id)
+        .group_by(AttendanceSession.subject)
+        .order_by(AttendanceSession.subject)
+    )
+    rows = (await db.execute(query)).all()
+    results = []
+    for r in rows:
+        present = r.present or 0
+        late = r.late or 0
+        absent = r.absent or 0
+        total = present + late + absent
+        results.append({
+            "subject": r.subject or "Unknown",
+            "present": present,
+            "absent": absent,
+            "late": late,
+            "total": total,
+            "percentage": round(((present + late) / total) * 100, 1) if total else 0.0,
+        })
+    return results
+
+
+async def export_attendance_csv(
+    db: AsyncSession,
+    date_str: Optional[str] = None,
+    subject: Optional[str] = None,
+    year: Optional[int] = None,
+    branch: Optional[str] = None,
+    section: Optional[str] = None,
+) -> str:
+    """Export attendance records as CSV, with optional filters."""
     query = (
         select(
             AttendanceSession.start_time,
             AttendanceSession.subject,
             AttendanceSession.classroom,
+            AttendanceSession.year.label("session_year"),
+            AttendanceSession.branch.label("session_branch"),
+            AttendanceSession.section.label("session_section"),
             Student.roll_number,
             Student.name,
-            Student.department,
-            Student.section,
             Attendance.status,
             Attendance.confidence,
             Attendance.recognized_at,
@@ -248,14 +417,30 @@ async def export_attendance_csv(db: AsyncSession) -> str:
         .order_by(AttendanceSession.start_time.desc())
     )
 
-    result = await db.execute(query)
-    rows = result.all()
+    if date_str:
+        day = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        query = query.where(
+            and_(
+                AttendanceSession.start_time >= day,
+                AttendanceSession.start_time < day + timedelta(days=1),
+            )
+        )
+    if subject:
+        query = query.where(AttendanceSession.subject == subject)
+    if year:
+        query = query.where(AttendanceSession.year == year)
+    if branch:
+        query = query.where(AttendanceSession.branch == branch)
+    if section:
+        query = query.where(AttendanceSession.section == section)
+
+    rows = (await db.execute(query)).all()
 
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([
-        "Date", "Subject", "Classroom", "Roll Number", "Name",
-        "Department", "Section", "Status", "Confidence", "Recognized At"
+        "Date", "Subject", "Classroom", "Year", "Branch", "Section",
+        "Roll Number", "Name", "Status", "Confidence", "Recognized At"
     ])
 
     for row in rows:
@@ -263,10 +448,11 @@ async def export_attendance_csv(db: AsyncSession) -> str:
             row.start_time.strftime("%Y-%m-%d") if row.start_time else "",
             row.subject,
             row.classroom,
+            row.session_year or "",
+            row.session_branch or "",
+            row.session_section or "",
             row.roll_number,
             row.name,
-            row.department,
-            row.section,
             row.status,
             f"{row.confidence:.2f}" if row.confidence else "",
             row.recognized_at.strftime("%Y-%m-%d %H:%M:%S") if row.recognized_at else "",

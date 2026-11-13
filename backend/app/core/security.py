@@ -81,22 +81,31 @@ async def get_current_user(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    FastAPI dependency: extracts and validates JWT, returns the Faculty object.
-    Attach this to any route that requires authentication.
+    FastAPI dependency: extracts and validates JWT, returns the user object
+    (Faculty for admin/faculty roles, Student for student role).
+    The resolved object always has a `.role` attribute.
     """
     # Import here to avoid circular imports
     from app.models.faculty import Faculty
+    from app.models.student import Student
 
     payload = verify_token(token)
     user_id = payload.get("sub")
+    role = payload.get("role", "faculty")  # legacy tokens default to faculty
     if user_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token payload",
         )
 
-    result = await db.execute(select(Faculty).where(Faculty.id == int(user_id)))
-    user = result.scalar_one_or_none()
+    if role == "student":
+        result = await db.execute(select(Student).where(Student.id == int(user_id)))
+        user = result.scalar_one_or_none()
+        if user is not None:
+            user.role = "student"  # transient attribute
+    else:
+        result = await db.execute(select(Faculty).where(Faculty.id == int(user_id)))
+        user = result.scalar_one_or_none()
 
     if user is None:
         raise HTTPException(
@@ -104,4 +113,28 @@ async def get_current_user(
             detail="User not found",
         )
 
+    return user
+
+
+async def require_staff(
+    user=Depends(get_current_user),
+):
+    """Dependency: allow only admin or faculty roles."""
+    if getattr(user, "role", None) not in ("admin", "faculty"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Staff access required",
+        )
+    return user
+
+
+async def require_admin(
+    user=Depends(get_current_user),
+):
+    """Dependency: allow only admin role."""
+    if getattr(user, "role", None) != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
     return user
